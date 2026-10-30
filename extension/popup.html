@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Gemini Dubbing — Progressive</title>
+  <link rel="stylesheet" href="popup.css"/>
+</head>
+<body>
+  <header><div class="logo">&#9654;</div><div><h1>Gemini Dubbing <span class="tag-v2">V2</span></h1><span class="subhead">English / Any language &rarr; Vietnamese</span></div></header>
+  <main>
+    <section class="panel model"><div class="eyebrow">TRANSLATION ENGINE</div>
+      <div class="model-title"><span class="star">&#10022;</span><div><b>Gemini 3.8 Flash</b><small>Audio analysis + Vietnamese translation</small></div><span class="free">FREE TIER</span></div>
+      <div class="model-title second"><span class="star">&#9835;</span><div><b>Gemini Flash TTS</b><small>Vietnamese voice generation</small></div></div>
+    </section>
+    <section class="panel streaming"><div class="eyebrow">NEW — PROGRESSIVE BUFFERING</div>
+      <p class="instruction">Dịch từng đoạn 20 giây. Bắt đầu nghe sau khi có bộ đệm ban đầu; Gemini chỉ tiếp tục dịch trước vị trí đang xem.</p>
+      <div class="status" id="status">Checking backend...</div>
+      <div class="progress" title="Buffer ready from 00:00"><div id="progress" class="fill"></div></div>
+      <div class="buffer-timeline" id="bufferTimeline" title="Các đoạn audio đã xử lý"></div>
+      <div class="buffer-count" id="bufferInfo">Chưa bắt đầu dịch</div>
+      <button id="progressive" class="primary">▶ Start Progressive Dubbing</button>
+      <button id="playStream" class="primary" disabled>▶ Play buffered Vietnamese audio</button>
+      <button id="stopStream" class="secondary" disabled>■ Stop streamed dubbing</button>
+    </section>
+    <details class="legacy"><summary>Classic full-video mode (backup)</summary>
+      <section class="panel"><div class="eyebrow">LEGACY PROCESSING</div>
+        <p class="instruction">Chế độ cũ: chờ dịch toàn bộ trước khi nghe. Giới hạn 10 phút theo cấu hình demo cũ.</p>
+        <button id="direct" class="secondary">Gemini Direct (whole video)</button>
+        <button id="record" class="secondary">Fallback: record full video</button>
+        <button id="finish" class="secondary" disabled>Finish recording &amp; process</button>
+        <button id="play" class="secondary" disabled>Play finished Vietnamese dub</button>
+        <button id="stop" class="secondary" disabled>Stop full-file dub</button>
+      </section>
+    </details>
+    <section class="panel"><div class="eyebrow">VOICE &amp; SUBTITLES</div>
+      <label class="range"><span>Original sound</span><output id="originalPct">13%</output><input id="original" type="range" min="0" max="100" value="13"/></label>
+      <label class="range"><span>Vietnamese dub</span><output id="dubPct">100%</output><input id="dub" type="range" min="0" max="100" value="100"/></label>
+      <label class="switch"><span>Show Vietnamese subtitles</span><input type="checkbox" id="subtitles" checked /></label>
+    </section>
+    <div class="downloads"><a id="audioLink" target="_blank" rel="noopener">Download MP3</a><a id="srtLink" target="_blank" rel="noopener">Download SRT</a></div>
+    <p class="footnote">Progressive: public YouTube URLs (preview) and Gemini API key. Quota/network can still cause buffering. Local backend required.</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

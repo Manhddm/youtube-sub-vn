@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini YouTube Dubbing (Progressive V2)",
+  "version": "0.2.0",
+  "description": "Progressively prepare Gemini Vietnamese dubbed audio in buffered chunks while you watch YouTube.",
+  "minimum_chrome_version": "116",
+  "permissions": ["tabCapture", "offscreen", "activeTab", "storage", "tabs"],
+  "host_permissions": ["https://www.youtube.com/*", "http://127.0.0.1:8765/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html", "default_title": "Gemini Dubbing"},
+  "content_scripts": [{
+    "matches": ["https://www.youtube.com/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }]
+}
