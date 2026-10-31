@@ -62,6 +62,10 @@ class YouTubeJob(BaseModel):
     declared_duration: float
 
 
+class StreamJobRequest(YouTubeJob):
+    mode: str = "dub"
+
+
 def work_public_video(job_id: str, video_id: str, duration: float, folder: Path):
     try:
         info = process_youtube_url(
@@ -180,21 +184,25 @@ def subtitles(job_id: str):
 # translated MP3 before the first playback. Each job streams fixed-time WAV
 # chunks, while Gemini keeps preparing future clips in a background thread.
 @app.post("/stream/jobs", status_code=202)
-def start_stream_job(request: YouTubeJob):
+def start_stream_job(request: StreamJobRequest):
     if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", request.video_id):
         raise HTTPException(400, "Invalid YouTube video ID")
     if not (1 <= request.declared_duration <= MAX_STREAM_SECS):
         raise HTTPException(400, f"Progressive mode supports videos up to {MAX_STREAM_SECS} seconds")
-    job_id = cache_key(request.video_id, request.declared_duration)
+    mode = request.mode.strip().lower()
+    if mode not in ("dub", "subtitles"):
+        raise HTTPException(400, "mode must be dub or subtitles")
+    job_id = cache_key(request.video_id, request.declared_duration, mode)
     with stream_lock:
         job = stream_jobs.get(job_id)
         if job is None:
             folder = JOBS / job_id
-            job = ProgressiveJob(request.video_id, request.declared_duration, folder)
+            job = ProgressiveJob(request.video_id, request.declared_duration,
+                                 folder, mode)
             stream_jobs[job_id] = job
         job.seek(0)
         job.restart_if_failed()
-    return {"job_id": job_id, "chunk_seconds": job.chunk_seconds}
+    return {"job_id": job_id, "chunk_seconds": job.chunk_seconds, "mode": mode}
 
 
 def require_stream(job_id: str):
@@ -228,6 +236,8 @@ def stream_seek(job_id: str, request: StreamSeek):
 @app.get("/stream/jobs/{job_id}/chunks/{index}/audio")
 def stream_chunk_audio(job_id: str, index: int):
     job = require_stream(job_id)
+    if job.mode == "subtitles":
+        raise HTTPException(409, "This job is subtitles-only; no dubbed audio exists")
     if index < 0 or index >= job.count:
         raise HTTPException(404, "Unknown chunk")
     if index not in job.snapshot()["ready_chunks"]:

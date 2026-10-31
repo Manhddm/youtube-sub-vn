@@ -61,7 +61,7 @@ def main():
                         "-i", "sine=frequency=440:duration=5", "-c:a", "libopus", str(video)],
                        check=True)
         original_factory = engine.gemini_client
-        engine.gemini_client = FakeClient
+        engine.gemini_client = lambda *args, **kwargs: FakeClient()
         os.environ["TTS_PROVIDER"] = "gemini"
         try:
             messages = []

@@ -5,12 +5,18 @@ const INIT = {
   message: 'Open a YouTube video to start.', error: '', progress: 0,
   originalVolume: 0.13, dubVolume: 1, subtitles: true,
   streamJobId: null, streamReady: 0, streamTotal: 0, streamChunk: 20,
+  streamMode: 'dub',
   streamDuration: 0, streamBufferedTo: 0, streamProgress: 0,
-  streamRanges: [], streamPlayhead: 0, streamPlayheadBufferedTo: 0
+  streamRanges: [], streamPlayhead: 0, streamPlayheadBufferedTo: 0,
+  streamAnalysisModel: '', streamTtsModel: '',
+  streamTtsProvider: '', streamTtsVoice: '',
+  streamAnalysisFallback: false, streamTtsFallback: false
 };
 let creatingOffscreen = null;
 let starting = false;
 let finishing = false;
+let rebuildingStream = null;
+let lastStreamRecreate = 0;
 
 async function state() {
   const {dubState} = await chrome.storage.local.get('dubState');
@@ -78,8 +84,9 @@ async function processPublicUrl() {
   }
 }
 
-// NEW: buffered dubbing. Clip generation happens while the user watches.
-async function processProgressive() {
+// NEW: buffered dubbing or captions. Clip generation happens while the user watches.
+async function processProgressive(mode = 'dub') {
+  const streamMode = mode === 'subtitles' ? 'subtitles' : 'dub';
   const old = await state();
   if (['starting', 'recording', 'uploading', 'processing'].includes(old.stage)) {
     throw new Error('Stop the existing full-video job before starting progressive mode.');
@@ -96,16 +103,24 @@ async function processProgressive() {
   }
   const response = await fetch(`${API}/stream/jobs`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({video_id: check.videoId, declared_duration: check.duration})
+    body: JSON.stringify({video_id: check.videoId, declared_duration: check.duration,
+      mode: streamMode})
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.detail || `Backend HTTP ${response.status}`);
   await update({
     stage: 'stream_processing', tabId: tab.id, videoId: check.videoId,
-    jobId: null, streamJobId: data.job_id, streamDuration: check.duration,
+    jobId: null, streamJobId: data.job_id, streamMode,
+    streamDuration: check.duration,
     streamChunk: data.chunk_seconds, streamReady: 0, streamTotal: 0,
     streamRanges: [], streamPlayhead: 0, streamPlayheadBufferedTo: 0,
-    progress: 0, error: '', message: 'Gemini is preparing the first audio buffer...'
+    streamAnalysisModel: '', streamTtsModel: '',
+    streamTtsProvider: '', streamTtsVoice: '',
+    streamAnalysisFallback: false, streamTtsFallback: false,
+    progress: 0, error: '',
+    message: streamMode === 'subtitles'
+      ? 'Gemini is preparing the first Vietnamese subtitle cues...'
+      : 'Gemini is preparing the first audio buffer...'
   });
   return {ok: true};
 }
@@ -117,48 +132,131 @@ async function streamSnapshot(jobId) {
   return payload;
 }
 
+async function recreateStreamJob(current) {
+  if (rebuildingStream) return rebuildingStream;
+  if (!current.streamJobId || !current.videoId || !(current.streamDuration > 0)) return null;
+  if (Date.now() - lastStreamRecreate < 4000) return null;
+  lastStreamRecreate = Date.now();
+  rebuildingStream = (async () => {
+    try {
+      const response = await fetch(`${API}/stream/jobs`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({video_id: current.videoId,
+          declared_duration: current.streamDuration,
+          mode: current.streamMode === 'subtitles' ? 'subtitles' : 'dub'})
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `Backend HTTP ${response.status}`);
+      return await update({
+        streamJobId: data.job_id, streamChunk: data.chunk_seconds,
+        streamMode: data.mode || current.streamMode,
+        streamAnalysisModel: '', streamTtsModel: '',
+        streamTtsProvider: '', streamTtsVoice: '',
+        streamAnalysisFallback: false, streamTtsFallback: false,
+        error: '', message: 'Reconnected to the cached progressive job.'
+      });
+    } finally {
+      rebuildingStream = null;
+    }
+  })();
+  return rebuildingStream;
+}
+
+function modelStatus(snapshot, role) {
+  const order = snapshot.model_order?.[role] || [];
+  const active = snapshot.models?.[role] || order[0] || '';
+  const primary = order[0] || '';
+  return {active, fallback: Boolean(active && primary && active !== primary)};
+}
+
 async function refreshStream(current) {
   if (!current.streamJobId || !String(current.stage).startsWith('stream_')) return current;
   try {
     const snapshot = await streamSnapshot(current.streamJobId);
+    const subtitles = (snapshot.mode || current.streamMode) === 'subtitles';
     const startChunks = Math.min(2, snapshot.total_chunks);
     const readyFromStart = Array.from({length: startChunks}, (_, i) => i)
       .filter(index => snapshot.ready_chunks.includes(index)).length;
     let nextStage;
     if (snapshot.stage === 'error') nextStage = 'stream_error';
     else if (current.stage === 'stream_playing') nextStage = 'stream_playing';
+    else if (subtitles) {
+      nextStage = snapshot.completed_chunks > 0 ? 'stream_ready' : 'stream_processing';
+    }
     else if (readyFromStart >= startChunks) nextStage = 'stream_ready';
     else nextStage = 'stream_processing';
+    const analysis = modelStatus(snapshot, 'analysis');
+    const tts = modelStatus(snapshot, 'tts');
     return update({
       stage: nextStage, streamReady: snapshot.completed_chunks,
       streamTotal: snapshot.total_chunks, streamBufferedTo: snapshot.playable_until,
+      streamMode: snapshot.mode || current.streamMode,
       streamDuration: snapshot.duration, streamChunk: snapshot.chunk_seconds,
       streamRanges: snapshot.ranges, streamPlayhead: snapshot.playhead,
       streamPlayheadBufferedTo: snapshot.playhead_buffered_until,
       streamProgress: snapshot.completed_chunks / snapshot.total_chunks,
+      streamAnalysisModel: analysis.active,
+      streamTtsModel: tts.active,
+      streamTtsProvider: snapshot.tts_provider || '',
+      streamTtsVoice: snapshot.tts_voice || '',
+      streamAnalysisFallback: analysis.fallback,
+      streamTtsFallback: tts.fallback,
       progress: snapshot.completed_chunks / snapshot.total_chunks,
       message: snapshot.stage === 'error' ? snapshot.error : snapshot.message,
       error: snapshot.error || ''
     });
   } catch (_) {
-    return current; // A restart or brief offline period should not erase the job.
+    // A backend restart drops in-memory jobs while the disk cache survives;
+    // POST /stream/jobs rebuilds the job under the same deterministic key.
+    try {
+      const rebuilt = await recreateStreamJob(current);
+      return rebuilt ? await refreshStream(rebuilt) : current;
+    } catch (_) {
+      return current;
+    }
+  }
+}
+
+async function streamSnapshotForContent(jobId) {
+  const current = await state();
+  if (current.streamJobId !== jobId) throw new Error('Unknown stream job');
+  try {
+    const snapshot = await streamSnapshot(jobId);
+    if (snapshot.job_id && snapshot.job_id !== current.streamJobId) {
+      await update({streamJobId: snapshot.job_id, streamChunk: snapshot.chunk_seconds});
+    }
+    return snapshot;
+  } catch (error) {
+    const rebuilt = await recreateStreamJob(current);
+    if (!rebuilt) throw error;
+    return await streamSnapshot(rebuilt.streamJobId);
   }
 }
 
 async function startStreamPlayback() {
   const s = await refreshStream(await state());
-  if (!s.streamJobId || !['stream_ready', 'stream_playing'].includes(s.stage)) {
-    throw new Error('Buffering first two dubbed segments; try when Start playback is enabled.');
+  const subtitles = s.streamMode === 'subtitles';
+  const allowed = subtitles
+    ? ['stream_processing', 'stream_ready', 'stream_playing']
+    : ['stream_ready', 'stream_playing'];
+  if (!s.streamJobId || !allowed.includes(s.stage)) {
+    throw new Error(subtitles
+      ? 'Open the Vietnamese subtitle job again, then retry.'
+      : 'Buffering first two dubbed segments; try when Start playback is enabled.');
   }
   const tab = await activeYouTube();
   if (tab.id !== s.tabId) throw new Error('Switch back to the original video tab.');
   const result = await chrome.tabs.sendMessage(tab.id, {
     type: 'PLAY_STREAM', jobId: s.streamJobId, videoId: s.videoId,
+    mode: s.streamMode,
     originalVolume: s.originalVolume, dubVolume: s.dubVolume,
     subtitles: s.subtitles
   });
   if (!result?.ok) throw new Error(result?.error || 'Failed to start buffered playback');
-  await update({stage: 'stream_playing', message: 'Buffered dub active. Press Play on YouTube.'});
+  await update({stage: 'stream_playing',
+    message: subtitles
+      ? 'Vietnamese subtitles active. Original audio is unchanged.'
+      : 'Buffered dub active. Press Play on YouTube.'});
   return {ok: true};
 }
 
@@ -166,7 +264,10 @@ async function stopStreamPlayback() {
   const s = await state();
   if (s.tabId) await chrome.tabs.sendMessage(s.tabId, {type: 'STOP_STREAM'}).catch(() => {});
   if (s.stage === 'stream_playing') await update({
-    stage: 'stream_ready', message: 'Stopped dubbing. Buffered segments are still cached.'
+    stage: 'stream_ready',
+    message: s.streamMode === 'subtitles'
+      ? 'Stopped Vietnamese subtitles. Translation cache is still available.'
+      : 'Stopped dubbing. Buffered segments are still cached.'
   });
   return {ok: true};
 }
@@ -329,10 +430,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.target === 'offscreen') return false;
   const handler = {
     GET_STATE: async () => ({ok: true, state: await refreshJob()}),
-    START_PROGRESSIVE: processProgressive,
+    START_PROGRESSIVE: () => processProgressive(message.mode),
     PLAY_STREAM_REQUEST: startStreamPlayback,
     STOP_STREAM_REQUEST: stopStreamPlayback,
-    STREAM_SNAPSHOT: async () => ({ok: true, snapshot: await streamSnapshot(message.jobId)}),
+    STREAM_SNAPSHOT: async () => ({ok: true,
+      snapshot: await streamSnapshotForContent(message.jobId)}),
     STREAM_ASSET: () => requestStreamAsset(message.jobId, message.index, message.asset),
     STREAM_PLAYHEAD: () => setStreamPlayhead(message.jobId, message.seconds),
     START_URL: processPublicUrl,

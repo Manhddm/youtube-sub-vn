@@ -6,10 +6,22 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
+if not exist .env (
+    if not exist .env.example (
+        echo ERROR: .env.example is missing. Restore the project template.
+        pause
+        exit /b 1
+    )
+    copy .env.example .env >nul
+    if errorlevel 1 (
+        echo ERROR: Could not create .env from .env.example.
+        pause
+        exit /b 1
+    )
+)
 py -3 -m venv .venv
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if not exist .env copy .env.example .env
 if errorlevel 1 (
     echo Setup failed.
 ) else (

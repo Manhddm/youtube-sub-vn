@@ -25,8 +25,12 @@ class FakeInteractions:
         clip = next(x for x in input if x['type'] == 'video')
         processing = clip['processing']
         assert processing['type'] == 'static'
-        assert isinstance(processing['start_offset'], int)
-        assert processing['end_offset'] > processing['start_offset']
+        # The Interactions API expects duration strings such as "0s" / "20s".
+        assert isinstance(processing['start_offset'], str)
+        assert isinstance(processing['end_offset'], str)
+        assert processing['start_offset'].endswith('s')
+        assert processing['end_offset'].endswith('s')
+        assert float(processing['end_offset'][:-1]) > float(processing['start_offset'][:-1])
         return SimpleNamespace(output_text=json.dumps({'segments': [
             {'start': 2., 'end': 5., 'original': 'Hi there', 'vi': 'Xin chao'}
         ]}))
@@ -47,7 +51,7 @@ def wait_for(predicate, timeout=5.):
 def main():
     original_client = progressive.gemini_client
     original_synth = progressive.synth_gemini
-    progressive.gemini_client = lambda: FakeClient()
+    progressive.gemini_client = lambda *args, **kwargs: FakeClient()
     progressive.synth_gemini = synth_wav
     try:
         with tempfile.TemporaryDirectory() as folder:
@@ -58,6 +62,13 @@ def main():
             snap = job.snapshot()
             assert snap['stage'] == 'buffered', snap
             assert snap['playable_until'] == 80., snap
+            assert set(snap['models']) == {'analysis', 'tts'}, snap
+            assert snap['models']['analysis'], 'the analysis model in use should be reported'
+            stats = snap['stats']
+            assert stats['chunks_done'] == 4, stats
+            assert stats['analysis_calls'] == 4, stats
+            assert stats['tts_calls'] >= 4, stats
+            assert stats['avg_chunk_seconds'] is not None, stats
             assert sorted(snap['ready_chunks']) == [0,1,2,3], snap
             assert not (path/'chunk_00004.wav').exists(), 'Worker should NOT process unneeded future'
             with wave.open(str(path/'chunk_00000.wav')) as wav:
@@ -78,6 +89,41 @@ def main():
         cues = progressive.analyze_youtube_window(fake, 'abcdef12345', 112, 20, 40)
         assert cues and cues[0]['start'] >= 20
         print('PASS: Gemini YouTube clip API payload (mocked)')
+
+        original_analyze = progressive.analyze_youtube_window
+        original_attempts = progressive.CHUNK_ATTEMPTS
+        original_delay = progressive.CHUNK_RETRY_SECONDS
+        progressive.CHUNK_RETRY_SECONDS = 0
+        calls = {'n': 0}
+        def flaky(client, video_id, duration, begin, end):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise RuntimeError('503 high demand')
+            return [{'start': begin + 1, 'end': begin + 2,
+                     'original': 'hi', 'vi': 'Xin chào'}]
+        try:
+            progressive.analyze_youtube_window = flaky
+            with tempfile.TemporaryDirectory() as folder:
+                job = progressive.ProgressiveJob('retry123456', 40., Path(folder))
+                assert wait_for(lambda: job.snapshot()['completed_chunks'] == 2), job.snapshot()
+                assert calls['n'] >= 3, calls
+                assert not job.snapshot()['error'], job.snapshot()
+                job.close()
+            print('PASS: one transient chunk failure is retried automatically')
+
+            def broken(client, video_id, duration, begin, end):
+                raise RuntimeError('quota exhausted')
+            progressive.analyze_youtube_window = broken
+            with tempfile.TemporaryDirectory() as folder:
+                job = progressive.ProgressiveJob('broken123456', 20., Path(folder))
+                assert wait_for(lambda: job.snapshot()['stage'] == 'error'), job.snapshot()
+                assert 'quota exhausted' in job.snapshot()['error'], job.snapshot()
+                job.close()
+            print('PASS: retries stop after the configured attempts')
+        finally:
+            progressive.analyze_youtube_window = original_analyze
+            progressive.CHUNK_ATTEMPTS = original_attempts
+            progressive.CHUNK_RETRY_SECONDS = original_delay
     finally:
         progressive.gemini_client = original_client
         progressive.synth_gemini = original_synth

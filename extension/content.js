@@ -166,8 +166,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return sendResponse({ok: true});
   }
   if (message?.type === 'DUB_SETTINGS' && streamPlayback) {
-    streamPlayback.video.volume = message.originalVolume;
-    streamPlayback.gain.gain.value = message.dubVolume;
+    if (streamPlayback.mode !== 'subtitles') {
+      streamPlayback.video.volume = message.originalVolume;
+      streamPlayback.gain.gain.value = message.dubVolume;
+    }
     streamPlayback.subtitles = Boolean(message.subtitles);
     streamCaption(streamPlayback);
     return sendResponse({ok: true});
@@ -223,12 +225,12 @@ function stopStream() {
   for (const [event, callback] of s.listeners) s.video.removeEventListener(event, callback);
   stopScheduled(s);
   s.overlay?.remove();
-  if (s.video.isConnected) {
+  if (s.mode !== 'subtitles' && s.video.isConnected) {
     s.video.volume = s.restore.volume;
     s.video.muted = s.restore.muted;
   }
   if (caption) caption.style.display = 'none';
-  s.ctx.close().catch(() => {});
+  s.ctx?.close().catch(() => {});
 }
 function streamCaption(s) {
   if (streamPlayback !== s || !s.subtitles) {
@@ -266,6 +268,23 @@ async function fetchStreamChunk(s, index) {
     if (s === streamPlayback) streamOverlay(s, true, `Lỗi tải đoạn âm thanh: ${error.message}`);
   } finally {
     s.fetching.delete(index);
+  }
+}
+async function fetchCueChunk(s, index) {
+  if (s !== streamPlayback || s.cues.has(index) || s.cueFetching.has(index) ||
+      !s.ready.has(index)) return;
+  s.cueFetching.add(index);
+  try {
+    const answer = await chrome.runtime.sendMessage({
+      type: 'STREAM_ASSET', jobId: s.jobId, index, asset: 'cues'
+    });
+    if (!answer?.ok) throw new Error(answer?.error || 'Subtitle chunk request failed');
+    if (s !== streamPlayback) return;
+    s.cues.set(index, answer.cues || []);
+  } catch (error) {
+    if (s === streamPlayback) streamOverlay(s, true, `Lỗi tải phụ đề: ${error.message}`);
+  } finally {
+    s.cueFetching.delete(index);
   }
 }
 function scheduleStreamChunk(s, index) {
@@ -310,6 +329,17 @@ function streamDrive(s) {
   const index = Math.max(0, Math.min(s.total - 1,
     Math.floor(s.video.currentTime / s.chunkSeconds)));
   streamCaption(s);
+  if (s.mode === 'subtitles') {
+    // Captions never pause or schedule audio; the original YouTube sound and
+    // volume stay exactly as the viewer set them.
+    for (const idx of [...s.cues.keys()]) {
+      if (idx < index - 2 || idx > index + 4) s.cues.delete(idx);
+    }
+    for (let i = index; i <= Math.min(s.total - 1, index + 1); i++) {
+      if (s.ready.has(i)) fetchCueChunk(s, i);
+    }
+    return;
+  }
   // Always cache at most five PCM chunks around playhead to bound memory.
   for (const idx of [...s.buffers.keys()]) {
     if (idx < index - 2 || idx > index + 4) s.buffers.delete(idx);
@@ -352,6 +382,18 @@ async function streamPoll(s) {
     });
     if (reply?.ok) {
       const data = reply.snapshot;
+      if (data.job_id && data.job_id !== s.jobId) s.jobId = data.job_id;
+      if (data.chunk_seconds !== s.chunkSeconds || data.duration !== s.duration ||
+          data.total_chunks !== s.total) {
+        // Chunk geometry changed (e.g. backend config); old buffers are invalid.
+        s.chunkSeconds = data.chunk_seconds;
+        s.duration = data.duration;
+        s.total = data.total_chunks;
+        s.buffers.clear();
+        s.cues.clear();
+        stopScheduled(s);
+        s.pausedByBuffer = false;
+      }
       s.ready = new Set(data.ready_chunks);
       if (data.stage === 'error') {
         streamOverlay(s, true, `Gemini gặp lỗi: ${data.error}`);
@@ -359,8 +401,15 @@ async function streamPoll(s) {
       }
       const idx = Math.max(0, Math.min(s.total - 1,
         Math.floor(s.video.currentTime / s.chunkSeconds)));
-      for (let i = idx; i <= Math.min(s.total - 1, idx + 3); i++) {
-        if (s.ready.has(i)) fetchStreamChunk(s, i);
+      if (s.mode === 'subtitles') {
+        for (let i = Math.max(0, idx - 1);
+             i <= Math.min(s.total - 1, idx + 2); i++) {
+          if (s.ready.has(i)) fetchCueChunk(s, i);
+        }
+      } else {
+        for (let i = idx; i <= Math.min(s.total - 1, idx + 3); i++) {
+          if (s.ready.has(i)) fetchStreamChunk(s, i);
+        }
       }
     }
     // Re-prioritize next clips when the viewer scrubs or keeps watching.
@@ -380,29 +429,41 @@ async function activateStream(message) {
   }
   stopDub();
   stopStream();
-  const ctx = new AudioContext({sampleRate: 24000});
-  const gain = ctx.createGain();
-  gain.gain.value = message.dubVolume;
-  gain.connect(ctx.destination);
   const info = await chrome.runtime.sendMessage({
     type: 'STREAM_SNAPSHOT', jobId: message.jobId
   });
-  if (!info?.ok) {await ctx.close(); return {ok: false, error: info?.error || 'Cannot get stream status'};}
+  if (!info?.ok) return {ok: false, error: info?.error || 'Cannot get stream status'};
   const data = info.snapshot;
+  const mode = ((message.mode || data.mode) === 'subtitles') ? 'subtitles' : 'dub';
+  let ctx = null;
+  let gain = null;
+  if (mode === 'dub') {
+    ctx = new AudioContext({sampleRate: 24000});
+    gain = ctx.createGain();
+    gain.gain.value = message.dubVolume;
+    gain.connect(ctx.destination);
+  }
   const s = {
-    jobId: message.jobId, videoId: message.videoId, video, ctx, gain,
+    mode, jobId: message.jobId, videoId: message.videoId, video, ctx, gain,
     chunkSeconds: data.chunk_seconds, duration: data.duration,
     total: data.total_chunks, ready: new Set(data.ready_chunks),
     subtitles: message.subtitles, buffers: new Map(), cues: new Map(),
-    fetching: new Set(), sources: new Map(), overlay: null,
+    fetching: new Set(), cueFetching: new Set(), sources: new Map(), overlay: null,
     listeners: [], restore: {volume: video.volume, muted: video.muted},
     timer: null, pollTimer: null, polling: false, pausedByBuffer: false
   };
   streamPlayback = s;
-  video.muted = false;
-  video.volume = message.originalVolume;
+  if (mode !== 'subtitles') {
+    video.muted = false;
+    video.volume = message.originalVolume;
+  }
   const on = (name, fn) => {video.addEventListener(name, fn); s.listeners.push([name, fn]);};
-  on('play', () => { if (s === streamPlayback) {s.ctx.resume().catch(() => {}); streamDrive(s);} });
+  on('play', () => {
+    if (s === streamPlayback) {
+      s.ctx?.resume().catch(() => {});
+      streamDrive(s);
+    }
+  });
   on('pause', () => {if (s === streamPlayback) stopScheduled(s);});
   on('waiting', () => {if (s === streamPlayback) stopScheduled(s);});
   on('seeking', () => {if (s === streamPlayback) { stopScheduled(s); s.pausedByBuffer = false; }});
