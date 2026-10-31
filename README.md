@@ -12,7 +12,8 @@ chunk is still being prepared. Start it with **Start Vietnamese Subtitles** in
 the popup.
 
 **Read `README_VI.md` first for Windows setup, migration from V1, instructions,
-limitations and troubleshooting in Vietnamese.**
+limitations and troubleshooting in Vietnamese.** For a product introduction and
+end-user walkthrough (Vietnamese), see `HUONG_DAN.md`.
 
 **Status (2026-10-31):** the V2 progressive flow was verified end-to-end on a
 15:04 public video with Chrome for Testing 156: initial buffering, Vietnamese
@@ -158,6 +159,8 @@ Generated artifacts are stored at `backend/jobs/<job_id>/`.
 ## 8. Project tree
 
 ```
+HUONG_DAN.md           # Vietnamese product intro + end-user walkthrough
+README_VI.md           # Vietnamese setup, architecture, troubleshooting
 backend/
   .env.example         # API key/config template
   setup_windows.bat    # creates venv and installs packages

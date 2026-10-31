@@ -1,4 +1,4 @@
-.env
+/.env
 jobs/
 __pycache__/
 .venv/
