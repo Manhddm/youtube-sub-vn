@@ -17,6 +17,7 @@ V2 có hai chế độ progressive:
 | --- | --- | --- |
 | Cách xử lý | Toàn video, MP3 duy nhất | Clip 20 giây, WAV độc lập |
 | Chế độ xem | Lồng tiếng | Lồng tiếng hoặc **chỉ phụ đề** (giữ nguyên tiếng gốc) |
+| Giọng đọc | Một giọng cố định trong `.env` | Chọn 4 giọng Việt ngay trong popup (Nam Minh/Hoài My + trầm/cao), mỗi giọng cache riêng |
 | Thời điểm bắt đầu nghe | Sau khi toàn bộ file hoàn thành | Sau khi 2 clip đầu đã sẵn sàng |
 | Dịch khi đang xem | Không | Có; chuẩn bị trước tối đa 4 clip gần vị trí xem |
 | Tua xa | Cần file dài hoàn chỉnh | Ưu tiên xử lý đoạn được tua đến |
@@ -56,6 +57,7 @@ GEMINI_MODEL_FALLBACKS=gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini
 # Khuyến nghị cho xem liên tục: Edge TTS nhanh hơn thời gian phát và không tốn quota Gemini.
 TTS_PROVIDER=edge
 EDGE_VOICE=vi-VN-NamMinhNeural
+EDGE_TTS_ATTEMPTS=5
 # Nếu cần giọng Gemini tự nhiên hơn, đổi TTS_PROVIDER=gemini; chấp nhận chậm hơn video.
 GEMINI_TTS_MODEL=gemini-3.8-flash-tts
 GEMINI_TTS_MODEL_FALLBACKS=gemini-3.8-flash-lite-tts,gemini-3.1-flash-tts-preview,gemini-2.5-flash-preview-tts
@@ -73,6 +75,24 @@ GEMINI_TTS_TIMEOUT_SECONDS=20
 
 `GEMINI_MODEL` và danh sách fallback được thử lần lượt khi model quá tải, mất kết nối hoặc timeout; model đang hoạt động được cache cho các đoạn sau. `GEMINI_MODEL_FALLBACKS` có thể để trống nếu chỉ muốn dùng một model.
 
+### 1.1 Dịch cục bộ (mặc định) — không cần API key, không tốn quota
+
+Từ bản này, phần **dịch** chạy trên máy bạn:
+
+```env
+TRANSLATION_PROVIDER=local
+LOCAL_MT_MODEL=Helsinki-NLP/opus-mt-en-vi
+LOCAL_MT_BEAM=1
+LOCAL_WHISPER_MODEL=base.en
+STREAM_LOOKAHEAD_LOCAL_CHUNKS=12
+```
+
+- Phụ đề tiếng Anh có sẵn của video được tải một lần (`youtube-transcript-api`) và cache trong `backend/.model_cache/transcripts/`; mỗi đoạn 20 giây sau đó chỉ cắt từ cache nên gần như tức thời.
+- Video không có phụ đề: `yt-dlp` tải luồng audio (cache trong `backend/.model_cache/audio/`) và `faster-whisper` (`base.en`, int8, VAD) chỉ nhận dạng đúng đoạn cần dùng.
+- Dịch Anh → Việt bằng CTranslate2 int8; model được chuyển đổi tự động từ Hugging Face trong lần chạy đầu (vài trăm MB, có mạng) vào `backend/.model_cache/ct2/`.
+- Vì dịch miễn phí, `STREAM_LOOKAHEAD_LOCAL_CHUNKS=12` cho phép dịch trước tới 240 giây quanh vị trí đang xem, trong khi phần tạo giọng vẫn chỉ chạy trước 4 đoạn (`STREAM_LOOKAHEAD_CHUNKS`).
+- `TRANSLATION_PROVIDER=gemini` quay lại đường cũ: gửi URL/clip cho Gemini (cần `GEMINI_API_KEY`, tốn quota). Hai provider dùng thư mục cache khác nhau nên không lẫn bản dịch.
+
 Python 3.14: file `requirements.txt` V2 đã thêm `audioop-lts` tự động để tránh lỗi `No module named 'pyaudioop'`.
 
 Chạy server:
@@ -81,7 +101,7 @@ Chạy server:
 .\run_windows.bat
 ```
 
-Mở `http://127.0.0.1:8765/health` và kiểm tra `ok: true`; trường `tts` cho biết provider đang dùng (`edge` hoặc `gemini`).
+Mở `http://127.0.0.1:8765/health` và kiểm tra `ok: true`; trường `translation` (`local`/`gemini`) và `tts` (`edge`/`gemini`) cho biết provider đang dùng.
 
 Chạy bác sĩ chẩn đoán trước khi xem video dài (không in API key, mọi lời gọi đều có timeout):
 
@@ -123,6 +143,23 @@ Dùng khi bạn chỉ muốn đọc phụ đề tiếng Việt và vẫn nghe â
 
 Chế độ này không gọi TTS, không tạo file WAV, không chỉnh âm lượng hay tắt tiếng video; cache riêng (khóa có `subtitles`) nên không lẫn với cache lồng tiếng. Nếu chưa có đủ đoạn phụ đề tại vị trí đang xem, video vẫn phát bình thường và phụ đề sẽ hiện khi đoạn đó dịch xong (không tạm dừng như chế độ lồng tiếng).
 
+### 2.2. Chọn giọng đọc tiếng Việt (Edge TTS)
+
+Bảng **VOICE & SUBTITLES** của popup có dropdown **Giọng đọc** với 4 preset miễn phí:
+
+| Nhãn trong popup | Giá trị gửi lên backend |
+| --- | --- |
+| Nam Minh (Giọng Nam chuẩn) | `vi-VN-NamMinhNeural` |
+| Hoài My (Giọng Nữ chuẩn) | `vi-VN-HoaiMyNeural` |
+| Nam Minh (Giọng Nam trầm) | `vi-VN-NamMinhNeural\|pitch=-10Hz` |
+| Hoài My (Giọng Nữ cao) | `vi-VN-HoaiMyNeural\|pitch=+8Hz` |
+
+- Đuôi `|pitch=±Hz` và `|rate=±%` là định dạng chuẩn của Edge TTS; backend kiểm tra bằng `parse_voice_spec()` trong `backend/engine.py` và trả `400` cho thông số sai (ví dụ `pitch=+8%`).
+- Giá trị chọn được lưu trong `chrome.storage` và gửi kèm khi tạo job (`POST /stream/jobs`, `POST /jobs/from-youtube`, `voice` của `/jobs` dạng form).
+- **Mỗi giọng một cache riêng**: `cache_key()` đưa voice vào khóa nên đổi giọng tạo `job_id` khác, không nghe nhầm bản cũ và không phá bản đã dịch của giọng kia. `EDGE_VOICE` trong `.env` là giá trị dùng khi client không gửi voice; nếu `EDGE_VOICE` đã là giọng mặc định thì cache cũ vẫn giữ nguyên.
+- Đổi giọng chỉ áp dụng khi bấm **Start** lại; đang phát thì job cũ giữ giọng cũ. Popup hiển thị giọng đang dùng qua `tts_voice` trong snapshot (rỗng ở chế độ chỉ phụ đề).
+- `TTS_PROVIDER=gemini` bỏ qua dropdown này và dùng `GEMINI_VOICE`.
+
 ## 3. Cách chỉnh dung lượng bộ đệm và tốc độ dịch
 
 File `backend/.env`:
@@ -153,7 +190,7 @@ STREAM_TTS_PARALLEL=4
 
 Gemini TTS cho giọng tự nhiên hơn nhưng thường mất **60–90s cho một đoạn 20s** trên Free Tier, tức chậm hơn thời gian xem và dễ chạm quota. Vì vậy cấu hình khuyến nghị cho video 10–30 phút là **Edge TTS**; dùng Gemini TTS khi bạn chấp nhận video phải dừng chờ hoặc chỉ xem đoạn ngắn.
 
-Sau khi chỉnh `.env`, khởi động lại backend. Cache sử dụng khóa gồm video, model, provider, voice, số giây/đoạn và chế độ (lồng tiếng/phụ đề) để tránh dùng nhầm bản cũ; đổi cấu hình sẽ tạo job/cache mới.
+Sau khi chỉnh `.env`, khởi động lại backend. Cache sử dụng khóa gồm video, model, provider, voice (kể cả preset `|pitch=`/`|rate=` chọn trong popup), số giây/đoạn và chế độ (lồng tiếng/phụ đề) để tránh dùng nhầm bản cũ; đổi cấu hình hoặc đổi giọng sẽ tạo job/cache mới.
 
 ### Kết quả nghiệm thu ngày 2026-10-31
 
@@ -189,6 +226,22 @@ Video công khai ngắn `jNQXAC9IVRw`, Chrome for Testing 156, `gemini-3.5-flash
 
 Chưa chạy live nhiều đoạn trên video dài ở chế độ này; phần chia đoạn/cache/seek dùng chung và đã được `tests/subtitles_test.py` kiểm tra.
 
+### Kết quả kiểm chứng bộ chọn giọng đọc (2026-10-31)
+
+Video công khai ngắn `jNQXAC9IVRw` (19s), `TTS_PROVIDER=edge`, lời gọi Edge TTS và Gemini thật:
+
+| Hạng mục | Kết quả |
+| --- | --- |
+| 4 preset render được | Đạt; cả 4 thông số đều tạo audio (câu 56 ký tự, ~26 KB WAV) |
+| Pitch có tác dụng | Đạt; cùng một câu, `vi-VN-NamMinhNeural` và `vi-VN-NamMinhNeural\|pitch=-10Hz` cho file **khác MD5**, cùng độ dài |
+| Job riêng theo giọng | Đạt; `8a2730…` (giọng chuẩn) và `a579b8…` (`pitch=-10Hz`) khác `job_id`, cả hai `stage=complete` |
+| `tts_voice` trong snapshot | Đạt; trả đúng chuỗi spec đã chọn, rỗng ở chế độ phụ đề |
+| Chế độ phụ đề bỏ qua giọng | Đạt; job `0ecb19…` tạo với `pitch=+8Hz` vẫn `tts_provider=""`, `tts_voice=""`, `tts_calls=0` |
+| Cache không đổi với giọng mặc định | Đạt; `cache_key(..., "vi-VN-NamMinhNeural")` trùng khóa cũ nên bản đã dịch không bị mất |
+| Edge TTS chập chờn | `NoAudioReceived` xảy ra theo cơn, kể cả giọng mặc định, không liên quan pitch. Với `EDGE_TTS_ATTEMPTS=3` một job phải thử lại ở cấp đoạn (`retries=1`); với mặc định mới `=5` job `pitch=-10Hz` chạy `retries=0, failures=0` |
+
+**Chưa nghiệm thu:** nghe trực tiếp trong Chrome cá nhân để chọn giọng bạn thích — phần này cần bạn xác nhận.
+
 ## 4. Lỗi thường gặp
 
 - `429 RESOURCE_EXHAUSTED`: hạn mức Free Tier/Gemini không đủ. V2 thử lần lượt các model trong `GEMINI_MODEL_FALLBACKS`, nhưng không thể đảm bảo phát liên tục. Giảm số lời gọi bằng `TTS_PROVIDER=edge`, tăng `STREAM_CHUNK_SECONDS`, hoặc chờ quota reset.
@@ -197,6 +250,8 @@ Chưa chạy live nhiều đoạn trên video dài ở chế độ này; phần 
 - `400 INVALID_ARGUMENT`: lỗi đầu vào/khóa; **không** fallback vô ích. Đọc thông báo trong popup/backend.
 - `Speech metadata is not supported for this model`: đã xử lý trong code (không còn gửi annotations). Nếu bạn tự sửa code và gặp lại, bỏ phần `annotations`/`speech_metadata` khỏi payload TTS.
 - `clip processing`/`INVALID_ARGUMENT`: trên tài khoản/video của bạn, Gemini có thể chưa chấp nhận cấu hình `start_offset`/`end_offset` kèm YouTube URL. Thử video công khai khác hoặc chế độ cũ.
+- `NoAudioReceived` (Edge TTS trả stream rỗng): dịch vụ không chính thức này chập chờn theo cơn, xảy ra cả với giọng mặc định chứ không phải do preset pitch/rate. `synth_edge` tự thử lại `EDGE_TTS_ATTEMPTS` lần (mặc định 5, backoff 0.5s×lần) cho từng câu trước khi báo lỗi đoạn. Vẫn lỗi thì bấm Start lại sau vài phút hoặc dùng `TTS_PROVIDER=gemini`.
+- Thông số giọng sai (ví dụ `pitch=+8%`): backend trả `400 Invalid voice parameter`. `pitch` chỉ nhận `±Hz`, `rate` chỉ nhận `±%`.
 - Nút play chưa sáng: chưa đủ hai đoạn đầu, xem thông báo trạng thái.
 - Tua xa: bình thường sẽ dừng video để ưu tiên dịch khu vực mới, hiện `Đang chuẩn bị giọng đọc tiếng Việt…`, rồi tự phát tiếp khi đoạn mới sẵn sàng.
 - Backend khởi động lại giữa chừng: extension tự tạo lại job từ cache (cùng `job_id` nếu giữ nguyên cấu hình) và tiếp tục các đoạn đã có; không cần bấm Start lại.
@@ -211,14 +266,14 @@ Chưa chạy live nhiều đoạn trên video dài ở chế độ này; phần 
 
 ```text
 Chrome popup
-  └── START_PROGRESSIVE (mode=dub | subtitles)
+  └── START_PROGRESSIVE (mode=dub | subtitles, voice=vi-VN-...|pitch=-10Hz)
        └── localhost POST /stream/jobs
             └── StreamJob worker (demand-driven)
                  ├── Gemini video URL + [start_offset,end_offset]
                  ├── JSON Vietnamese cues
-                 ├── [dub] Gemini TTS (hoặc Edge TTS dự phòng)
-                 └── [dub] WAV mono/24kHz đúng độ dài chunk + JSON cues → disk cache
-                     [subtitles] chỉ JSON cues → disk cache riêng
+                 ├── [dub] Edge TTS theo giọng đã chọn (mặc định) hoặc Gemini TTS
+                 └── [dub] WAV mono/24kHz đúng độ dài chunk + JSON cues → disk cache theo giọng
+                     [subtitles] chỉ JSON cues → disk cache riêng, bỏ qua giọng
 
 Chrome content.js (YouTube)
   ├── hỏi /stream/jobs/:id qua background proxy
@@ -237,6 +292,7 @@ Mã nguồn nằm ở `backend/progressive.py`, các endpoint mới ở cuối `
 Ở thư mục gốc project, sau khi cài dependency:
 
 ```powershell
+.\backend\.venv\Scripts\python.exe tests\voice_selector_test.py
 .\backend\.venv\Scripts\python.exe tests\progressive_test.py
 .\backend\.venv\Scripts\python.exe tests\subtitles_test.py
 .\backend\.venv\Scripts\python.exe tests\model_fallback_test.py
@@ -244,7 +300,7 @@ Mã nguồn nằm ở `backend/progressive.py`, các endpoint mới ở cuối `
 .\backend\.venv\Scripts\python.exe tests\smoke_test.py
 ```
 
-Các test mock kiểm tra: chia WAV 20s, bộ đệm đầu 80s, ưu tiên seek, cache, retry đoạn lỗi; **chế độ chỉ phụ đề** tạo đúng cue JSON, không gọi TTS/không tạo WAV, khóa cache tách biệt, endpoint audio trả 409; fallback model theo 503/404/timeout, dừng khi 400, retry một lượt khi tất cả bị throttle; bọc PCM thô thành WAV; tái tạo job sau restart; endpoint HTTP. **Test mock không thay thế việc nghe thử bằng tai trên máy của bạn.**
+Các test mock kiểm tra: chia WAV 20s, bộ đệm đầu 80s, ưu tiên seek, cache, retry đoạn lỗi; **chế độ chỉ phụ đề** tạo đúng cue JSON, không gọi TTS/không tạo WAV, khóa cache tách biệt, endpoint audio trả 409; **bộ chọn giọng** phân tích `|pitch=`/`|rate=`, chặn thông số sai, chuyển giọng xuống edge-tts, thử lại khi stream rỗng, tách cache theo giọng và validate `voice` ở API; fallback model theo 503/404/timeout, dừng khi 400, retry một lượt khi tất cả bị throttle; bọc PCM thô thành WAV; tái tạo job sau restart; endpoint HTTP. **Test mock không thay thế việc nghe thử bằng tai trên máy của bạn.**
 
 Kiểm tra API thật (tốn quota):
 

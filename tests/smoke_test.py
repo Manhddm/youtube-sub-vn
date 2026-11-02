@@ -63,6 +63,7 @@ def main():
         original_factory = engine.gemini_client
         engine.gemini_client = lambda *args, **kwargs: FakeClient()
         os.environ["TTS_PROVIDER"] = "gemini"
+        os.environ["TRANSLATION_PROVIDER"] = "gemini"
         try:
             messages = []
             result = engine.process_recording(video, folder, lambda a,b,c: messages.append((a,b,c)))

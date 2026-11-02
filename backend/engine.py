@@ -1,7 +1,9 @@
-"""Audio -> timestamped Vietnamese subtitles via Gemini -> synced dubbed MP3.
+"""Audio -> timestamped Vietnamese subtitles -> synced dubbed audio.
 
-The default configuration uses Gemini for both translation and TTS.
-No third-party model weights are needed locally. The API has free-tier quotas.
+Translation runs locally by default (`TRANSLATION_PROVIDER=local`): YouTube
+English captions or faster-whisper ASR plus a CTranslate2 model, no quota.
+Speech synthesis defaults to Edge TTS, batched asynchronously. Set the matching
+provider variables to `gemini` to use the API for either stage.
 """
 from __future__ import annotations
 
@@ -17,13 +19,21 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import wave
 from pathlib import Path
 from typing import Callable
 
 from pydub import AudioSegment
 
+from local_pipeline import get_pipeline, translation_provider
+
 Progress = Callable[[str, float, str], None]
+
+
+def tts_provider() -> str:
+    value = (os.getenv("TTS_PROVIDER") or "edge").strip().lower()
+    return value if value in {"gemini", "edge"} else "edge"
 
 SCHEMA = {
     "type": "object",
@@ -78,6 +88,8 @@ ANALYSIS_TIMEOUT_SECONDS = float(os.getenv("GEMINI_ANALYSIS_TIMEOUT_SECONDS", "3
 TTS_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TTS_TIMEOUT_SECONDS", "20"))
 MODEL_RETRY_DELAY_SECONDS = float(os.getenv("GEMINI_RETRY_DELAY_SECONDS", "2"))
 MODEL_RETRY_JITTER_SECONDS = float(os.getenv("GEMINI_RETRY_JITTER_SECONDS", "1"))
+EDGE_TTS_ATTEMPTS = max(1, int(os.getenv("EDGE_TTS_ATTEMPTS", "5")))
+TTS_PARALLEL = max(1, min(16, int(os.getenv("TTS_PARALLEL", "8"))))
 
 _MODEL_LOCK = threading.Lock()
 _MODEL_CACHE: dict[str, str | None] = {"analysis": None, "tts": None}
@@ -319,6 +331,8 @@ def parse_segments(body: dict, offset: float, duration: float) -> list[dict]:
 
 
 def analyze_audio(client, pieces: list[Path], report: Progress) -> list[dict]:
+    if translation_provider() == "local":
+        return _analyze_audio_local(pieces, report)
     all_segments: list[dict] = []
     offset = 0.0
     for index, chunk in enumerate(pieces):
@@ -356,8 +370,40 @@ def analyze_audio(client, pieces: list[Path], report: Progress) -> list[dict]:
 
 
 
+def _analyze_audio_local(pieces: list[Path], report: Progress) -> list[dict]:
+    pipeline = get_pipeline()
+    all_segments: list[dict] = []
+    offset = 0.0
+    for index, chunk in enumerate(pieces):
+        measured = ffprobe_duration(chunk)
+        report("local", 0.06 + 0.44 * index / len(pieces),
+               f"Local speech recognition {index + 1}/{len(pieces)}...")
+        cues = pipeline.transcribe(chunk, offset)
+        translations = pipeline.translate([cue["text"] for cue in cues])
+        for cue, vi in zip(cues, translations):
+            vi = (vi or "").strip()
+            if not vi:
+                continue
+            all_segments.append({
+                "start": round(cue["start"], 3), "end": round(cue["end"], 3),
+                "original": cue["text"], "vi": vi,
+            })
+        offset += measured
+    report("local", 0.5, f"Transcribed and translated {len(all_segments)} segments locally")
+    if not all_segments:
+        raise RuntimeError("Local ASR found no speech. Check the video has audible speech.")
+    return sorted(all_segments, key=lambda item: item["start"])
+
+
 def analyze_public_youtube(client, video_id: str, duration: float, report: Progress) -> list[dict]:
     """Public videos can be submitted by URL without extracting/downloading media."""
+    if translation_provider() == "local":
+        report("local", 0.12, "Reading the video's English captions locally...")
+        cues = get_pipeline().cues_for_video(video_id, duration)
+        if not cues:
+            raise RuntimeError("The local pipeline found no spoken cues for this video")
+        report("local", 0.5, f"Translated {len(cues)} spoken cues locally")
+        return cues
     url = f"https://www.youtube.com/watch?v={video_id}"
     report("gemini", 0.12, "Gemini is reading the public YouTube URL...")
     prompt = PROMPT + f"""
@@ -386,15 +432,19 @@ Return a full list of original speech and its Vietnamese translations.
     return cues
 
 
-def process_youtube_url(video_id: str, duration: float, work: Path, report: Progress) -> dict:
-    report("preparing", 0.02, "Sending the public YouTube URL to Gemini...")
-    client = gemini_client(ANALYSIS_TIMEOUT_SECONDS)
+def process_youtube_url(video_id: str, duration: float, work: Path, report: Progress,
+                        voice: str | None = None) -> dict:
+    local = translation_provider() == "local"
+    report("preparing", 0.02,
+           "Reading the public video captions..." if local
+           else "Sending the public YouTube URL to Gemini...")
+    client = None if local else gemini_client(ANALYSIS_TIMEOUT_SECONDS)
     cues = analyze_public_youtube(client, video_id, duration, report)
     (work / "transcript.json").write_text(
         json.dumps(cues, ensure_ascii=False, indent=2), encoding="utf-8")
     write_srt(cues, work / "subtitles.vi.srt")
-    build_dub(cues, duration, work, report)
-    report("ready", 1.0, "Gemini direct YouTube dubbing is ready")
+    build_dub(cues, duration, work, report, voice)
+    report("ready", 1.0, "YouTube dubbing is ready")
     return {"segments": len(cues), "duration": round(duration, 2), "input_mode": "youtube_url"}
 
 def srt_time(seconds: float) -> str:
@@ -420,7 +470,7 @@ def group_cues(cues: list[dict]) -> list[dict]:
             last = groups[-1]
             gap = cue["start"] - last["end"]
             span = cue["end"] - last["start"]
-            if 0 <= gap <= 0.40 and span <= 13.0 and len(last["vi"]) + len(cue["vi"]) < 230:
+            if 0 <= gap <= 0.65 and span <= 16.0 and len(last["vi"]) + len(cue["vi"]) <= 280:
                 last["end"] = cue["end"]
                 last["vi"] += " " + cue["vi"]
                 continue
@@ -466,10 +516,118 @@ def synth_gemini(client, text: str, path: Path) -> None:
     path.write_bytes(raw)
 
 
-def synth_edge(text: str, path: Path) -> None:
+VOICE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
+PITCH_RE = re.compile(r"[+-]\d{1,3}Hz")
+RATE_RE = re.compile(r"[+-]\d{1,3}%")
+PROSODY_FORMAT = {"pitch": PITCH_RE, "rate": RATE_RE}
+
+
+def parse_voice_spec(voice_spec: str) -> tuple[str, str, str]:
+    """Split 'vi-VN-NamMinhNeural|pitch=-10Hz|rate=+8%' into validated parts."""
+    parts = [p.strip() for p in (voice_spec or "").strip().split("|") if p.strip()]
+    if not parts:
+        raise ValueError("Voice is empty")
+    voice = parts[0]
+    if not VOICE_NAME_RE.fullmatch(voice):
+        raise ValueError(f"Invalid voice name: {voice}")
+    pitch = rate = ""
+    for param in parts[1:]:
+        key, sep, value = param.partition("=")
+        key, value = key.strip().lower(), value.strip()
+        if not sep or key not in PROSODY_FORMAT or not PROSODY_FORMAT[key].fullmatch(value):
+            raise ValueError(f"Invalid voice parameter: {param}")
+        if key == "pitch":
+            pitch = value
+        else:
+            rate = value
+    return voice, pitch, rate
+
+
+def _edge_arguments(voice_spec: str | None) -> tuple[str, dict]:
+    voice, pitch, rate = parse_voice_spec(
+        voice_spec or os.getenv("EDGE_VOICE", "vi-VN-NamMinhNeural"))
+    prosody = {}
+    if pitch:
+        prosody["pitch"] = pitch
+    rate = rate or os.getenv("EDGE_DEFAULT_RATE", "+15%")
+    if rate:
+        prosody["rate"] = rate
+    return voice, prosody
+
+
+async def _edge_retry_pause(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+async def synth_edge_async(text: str, path: Path, voice_spec: str | None = None) -> None:
     import edge_tts
-    voice = os.getenv("EDGE_VOICE", "vi-VN-NamMinhNeural")
-    asyncio.run(edge_tts.Communicate(text, voice).save(str(path)))
+    voice, prosody = _edge_arguments(voice_spec)
+    for attempt in range(1, EDGE_TTS_ATTEMPTS + 1):
+        try:
+            curr_text = text
+            if attempt == 2:
+                curr_text = unicodedata.normalize("NFD", text)
+            elif attempt == 3:
+                curr_text = text.strip().capitalize()
+            elif attempt >= 4:
+                curr_text = unicodedata.normalize("NFD", text.strip().capitalize())
+            await edge_tts.Communicate(curr_text, voice, **prosody).save(str(path))
+            return
+        except edge_tts.exceptions.NoAudioReceived:
+            if attempt >= EDGE_TTS_ATTEMPTS:
+                raise
+            await _edge_retry_pause(0.5 * attempt)
+
+
+def synth_edge(text: str, path: Path, voice_spec: str | None = None) -> None:
+    asyncio.run(synth_edge_async(text, path, voice_spec))
+
+
+async def synthesize_voices_async(items: list[tuple[str, Path]], provider: str,
+                                  tts_client=None, voice: str | None = None,
+                                  max_parallel: int = TTS_PARALLEL) -> None:
+    """One event loop for the whole batch; no thread per utterance."""
+    limit = asyncio.Semaphore(max(1, max_parallel))
+    failures: list[str] = []
+
+    async def one(text: str, path: Path) -> None:
+        async with limit:
+            try:
+                if provider == "gemini":
+                    await asyncio.to_thread(synth_gemini, tts_client, text, path)
+                else:
+                    await synth_edge_async(text, path, voice)
+            except Exception as exc:
+                failures.append(f"{path.name}: {str(exc)[:160]}")
+
+    await asyncio.gather(*(one(text, path) for text, path in items))
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)}/{len(items)} speech segments failed: {failures[0]}")
+
+
+def synthesize_voices(items: list[tuple[str, Path]], provider: str,
+                      tts_client=None, voice: str | None = None,
+                      max_parallel: int = TTS_PARALLEL) -> None:
+    if not items:
+        return
+    asyncio.run(synthesize_voices_async(items, provider, tts_client, voice, max_parallel))
+
+
+def speech_slots(groups: list[dict], begin: float, duration_ms: int,
+                 gap_ms: int = 25) -> list[dict]:
+    """Time each group may occupy: start offset and milliseconds available."""
+    slots: list[dict] = []
+    for n, group in enumerate(groups):
+        position = max(0, round((group["start"] - begin) * 1000))
+        next_start = (round((groups[n + 1]["start"] - begin) * 1000)
+                      if n + 1 < len(groups) else duration_ms)
+        available = min(duration_ms - position, next_start - position - gap_ms)
+        if available < 150:
+            continue
+        slots.append({"index": n, "text": group["vi"], "position": position,
+                      "available": available})
+    return slots
 
 
 def atempo_chain(rate: float) -> str:
@@ -494,48 +652,46 @@ def fit_to_slot(source_file: Path, max_ms: int, work: Path) -> AudioSegment:
     return AudioSegment.from_file(output)[:max_ms]
 
 
-def build_dub(cues: list[dict], duration: float, work: Path, report: Progress) -> None:
-    provider = os.getenv("TTS_PROVIDER", "gemini").lower().strip()
-    if provider not in {"gemini", "edge"}:
-        raise ValueError("TTS_PROVIDER must be 'gemini' or 'edge'")
+def build_dub(cues: list[dict], duration: float, work: Path, report: Progress,
+              voice: str | None = None) -> None:
+    provider = tts_provider()
     tts_client = gemini_client(TTS_TIMEOUT_SECONDS) if provider == "gemini" else None
     groups = group_cues(cues)
     total_ms = max(1000, math.ceil(duration * 1000))
     result = AudioSegment.silent(duration=total_ms, frame_rate=24000).set_channels(1)
-    for i, group in enumerate(groups):
-        start = min(total_ms, max(0, round(group["start"] * 1000)))
-        next_start = (max(0, round(groups[i+1]["start"] * 1000))
-                      if i+1 < len(groups) else total_ms)
-        available = min(total_ms - start, next_start - start - 35)
-        if available < 150:
-            continue
-        report("tts", 0.52 + 0.44 * i / len(groups),
-               f"{provider.upper()} generating voice {i + 1}/{len(groups)}...")
-        with tempfile.TemporaryDirectory(dir=work) as temp:
-            folder = Path(temp)
-            voice_file = folder / ("line.wav" if provider == "gemini" else "line.mp3")
-            if provider == "gemini":
-                synth_gemini(tts_client, group["vi"], voice_file)
-            else:
-                synth_edge(group["vi"], voice_file)
-            result = result.overlay(fit_to_slot(voice_file, available, folder), position=start)
+    slots = speech_slots(groups, 0.0, total_ms, gap_ms=35)
+    if not slots:
+        result.export(str(work / "dub.mp3"), format="mp3", bitrate="80k")
+        report("encoding", 0.98, "Dubbed MP3 rendered")
+        return
+    report("tts", 0.52, f"{provider.upper()} generating {len(slots)} voice segments...")
+    with tempfile.TemporaryDirectory(dir=work) as temp:
+        folder = Path(temp)
+        suffix = "wav" if provider == "gemini" else "mp3"
+        paths = [folder / f"line_{slot['index']:04d}.{suffix}" for slot in slots]
+        synthesize_voices(list(zip([slot["text"] for slot in slots], paths)),
+                          provider, tts_client, voice)
+        for slot, voice_file in zip(slots, paths):
+            result = result.overlay(fit_to_slot(voice_file, slot["available"], folder),
+                                    position=slot["position"])
     # MP3 for seamless seek/playback from a YouTube content script.
     result.export(str(work / "dub.mp3"), format="mp3", bitrate="80k")
     report("encoding", 0.98, "Dubbed MP3 rendered")
 
 
-def process_recording(capture: Path, work: Path, report: Progress) -> dict:
+def process_recording(capture: Path, work: Path, report: Progress,
+                      voice: str | None = None) -> dict:
     report("preparing", 0.02, "Preparing captured audio with FFmpeg...")
     pieces, duration = prepare_chunks(capture, work)
     max_seconds = float(os.getenv("MAX_VIDEO_SECONDS", "600"))
     if duration > max_seconds + 2:
         raise RuntimeError(f"Recording is longer than the {max_seconds:g} second demo limit")
-    client = gemini_client(ANALYSIS_TIMEOUT_SECONDS)
+    client = None if translation_provider() == "local" else gemini_client(ANALYSIS_TIMEOUT_SECONDS)
     cues = analyze_audio(client, pieces, report)
     (work / "transcript.json").write_text(
         json.dumps(cues, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     write_srt(cues, work / "subtitles.vi.srt")
-    build_dub(cues, duration, work, report)
+    build_dub(cues, duration, work, report, voice)
     report("ready", 1.0, "Vietnamese dub and subtitles are ready")
     return {"segments": len(cues), "duration": round(duration, 2)}

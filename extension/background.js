@@ -4,7 +4,8 @@ const INIT = {
   stage: 'idle', tabId: null, videoId: null, jobId: null,
   message: 'Open a YouTube video to start.', error: '', progress: 0,
   originalVolume: 0.13, dubVolume: 1, subtitles: true,
-  streamJobId: null, streamReady: 0, streamTotal: 0, streamChunk: 20,
+  voice: 'vi-VN-NamMinhNeural',
+  streamJobId: null, streamReady: 0, streamTotal: 0, streamChunk: 15,
   streamMode: 'dub',
   streamDuration: 0, streamBufferedTo: 0, streamProgress: 0,
   streamRanges: [], streamPlayhead: 0, streamPlayheadBufferedTo: 0,
@@ -71,7 +72,8 @@ async function processPublicUrl() {
   try {
     const response = await fetch(`${API}/jobs/from-youtube`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({video_id: check.videoId, declared_duration: check.duration}),
+      body: JSON.stringify({video_id: check.videoId, declared_duration: check.duration,
+        voice: old.voice}),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || `Backend HTTP ${response.status}`);
@@ -104,7 +106,7 @@ async function processProgressive(mode = 'dub') {
   const response = await fetch(`${API}/stream/jobs`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({video_id: check.videoId, declared_duration: check.duration,
-      mode: streamMode})
+      mode: streamMode, voice: old.voice})
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.detail || `Backend HTTP ${response.status}`);
@@ -143,7 +145,8 @@ async function recreateStreamJob(current) {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({video_id: current.videoId,
           declared_duration: current.streamDuration,
-          mode: current.streamMode === 'subtitles' ? 'subtitles' : 'dub'})
+          mode: current.streamMode === 'subtitles' ? 'subtitles' : 'dub',
+          voice: current.voice})
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || `Backend HTTP ${response.status}`);
@@ -174,7 +177,7 @@ async function refreshStream(current) {
   try {
     const snapshot = await streamSnapshot(current.streamJobId);
     const subtitles = (snapshot.mode || current.streamMode) === 'subtitles';
-    const startChunks = Math.min(2, snapshot.total_chunks);
+    const startChunks = Math.min(1, snapshot.total_chunks);
     const readyFromStart = Array.from({length: startChunks}, (_, i) => i)
       .filter(index => snapshot.ready_chunks.includes(index)).length;
     let nextStage;
@@ -414,10 +417,12 @@ async function stopDub() {
 }
 async function saveSettings(settings) {
   const clamp = value => Math.max(0, Math.min(1, Number(value) || 0));
-  const current = await update({
+  const patch = {
     originalVolume: clamp(settings.originalVolume),
     dubVolume: clamp(settings.dubVolume), subtitles: Boolean(settings.subtitles),
-  });
+  };
+  if (settings.voice) patch.voice = String(settings.voice);
+  const current = await update(patch);
   if ((current.stage === 'playing' || current.stage === 'stream_playing') && current.tabId) {
     await chrome.tabs.sendMessage(current.tabId, {
       type: 'DUB_SETTINGS', originalVolume: current.originalVolume,

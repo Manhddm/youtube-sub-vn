@@ -11,9 +11,9 @@ Một extension Chrome + backend chạy trên máy bạn, biến video YouTube n
 
 Điểm khác biệt so với các công cụ dịch video khác:
 
-- **Xem chỉ sau ~20–30 giây.** Gemini dịch và tạo giọng theo từng đoạn 20 giây. Có đủ 2 đoạn đầu là bấm play được, không cần chờ dịch cả video.
-- **Vừa xem vừa dịch.** Máy chỉ xử lý tối đa 4 đoạn phía trước vị trí bạn đang xem. Tua đến đâu dịch đến đó, dừng xem là ngừng tốn hạn mức.
-- **Không tải video, không vượt DRM/quảng cáo.** Backend chỉ gửi URL video công khai cho Gemini rồi nhận lại văn bản/dịch; phần âm thanh Việt phát đè lên bằng Web Audio của trình duyệt.
+- **Xem chỉ sau ~20–30 giây.** Máy bạn dịch theo từng đoạn 20 giây (mặc định dịch cục bộ, không cần khóa API) rồi Edge TTS tạo giọng. Có đủ 2 đoạn đầu là bấm play được, không cần chờ dịch cả video.
+- **Vừa xem vừa dịch.** Máy chỉ tạo giọng cho tối đa 4 đoạn phía trước vị trí bạn đang xem (bản dịch chữ được chuẩn bị trước tới 12 đoạn). Tua đến đâu xử lý đến đó.
+- **Không tải video, không vượt DRM/quảng cáo.** Mặc định backend chỉ đọc phụ đề tiếng Anh có sẵn của video và dịch trên máy; nếu video không có phụ đề mới tải luồng audio công khai về để nhận dạng giọng nói. Phần âm thanh Việt phát đè lên bằng Web Audio của trình duyệt.
 - **Xem lại không tốn phí lần hai.** Các đoạn đã dịch được cache trên đĩa (`backend/jobs/`); mở lại video cũ hoặc khởi động lại backend vẫn dùng được bản đã dịch.
 
 ## 2. Chọn chế độ nào
@@ -24,14 +24,14 @@ Một extension Chrome + backend chạy trên máy bạn, biến video YouTube n
 | Có tạo giọng đọc (TTS)? | Có (Edge TTS mặc định, hoặc Gemini TTS) | Không, không gọi TTS |
 | Khi chưa dịch kịp đoạn kế tiếp | Video **tạm dừng** + hiện `Đang chuẩn bị giọng đọc tiếng Việt…`, tự chạy tiếp khi xong | Video **vẫn chạy bình thường**, phụ đề hiện sau khi dịch xong |
 | Thời gian chờ ban đầu | ~20–30 giây (Edge TTS) | Nhanh hơn, chỉ cần đoạn đầu dịch xong |
-| Tốn hạn mức Gemini | Lời gọi phân tích + (nếu dùng) TTS | Chỉ lời gọi phân tích |
+| Tốn hạn mức Gemini | Không (dịch cục bộ + Edge TTS); chỉ tốn khi đặt `TRANSLATION_PROVIDER=gemini` | Không, trừ khi đặt `TRANSLATION_PROVIDER=gemini` |
 | Phù hợp khi | Muốn nghe thụ động, xem giải trí | Họp/học, cần nghe tiếng gốc, hoặc muốn tiết kiệm quota |
 
 ## 3. Chuẩn bị (một lần)
 
-**Yêu cầu:** Chrome 116 trở lên · Python 3.11+ (3.14 vẫn chạy tốt) · khóa Gemini API free tier · FFmpeg chỉ cần nếu dùng Classic mode.
+**Yêu cầu:** Chrome 116 trở lên · Python 3.11+ (3.14 vẫn chạy tốt) · FFmpeg **bắt buộc** (cắt audio cho nhận dạng giọng nói và ghép WAV) · khóa Gemini API **chỉ cần khi** đặt `TRANSLATION_PROVIDER=gemini` hoặc `TTS_PROVIDER=gemini`.
 
-1. Vào <https://aistudio.google.com/apikey>, tạo khóa API (project Free Tier).
+1. *(Tùy chọn)* Vào <https://aistudio.google.com/apikey>, tạo khóa API (project Free Tier) — chỉ cần nếu bạn muốn dùng Gemini để dịch/TTS thay vì chế độ cục bộ mặc định.
 2. Cài môi trường backend:
 
    ```powershell
@@ -39,7 +39,7 @@ Một extension Chrome + backend chạy trên máy bạn, biến video YouTube n
    .\setup_windows.bat
    ```
 
-3. Mở `backend\.env` (setup tự tạo từ `.env.example`), dán khóa vào dòng `GEMINI_API_KEY=`. **Không dán khóa vào code extension, không chia sẻ file `.env`.**
+3. Mở `backend\.env` (setup tự tạo từ `.env.example`). Chế độ mặc định `TRANSLATION_PROVIDER=local` + `TTS_PROVIDER=edge` **không cần khóa**; nếu dùng Gemini thì dán khóa vào dòng `GEMINI_API_KEY=`. **Không dán khóa vào code extension, không chia sẻ file `.env`.**
 4. Nạp extension: `chrome://extensions` → bật **Developer mode** → **Load unpacked** → chọn thư mục `youtube_gemini_progressive_v2\extension` → ghim icon **Gemini YouTube Dubbing (Progressive V2)** lên toolbar.
 
 ## 4. Xem mỗi ngày (30 giây là xong)
@@ -58,6 +58,7 @@ Một extension Chrome + backend chạy trên máy bạn, biến video YouTube n
 2. Chờ đủ 2 đoạn đầu (40 giây audio). Thanh timeline trong popup cho thấy đoạn nào đã xong.
 3. Bấm **▶ Play buffered Vietnamese audio**, rồi play video trên YouTube.
 4. Chỉnh trong bảng **VOICE & SUBTITLES**:
+   - **Giọng đọc** — chọn 1 trong 4 giọng Việt: *Nam Minh (Giọng Nam chuẩn)*, *Hoài My (Giọng Nữ chuẩn)*, *Nam Minh (Giọng Nam trầm)*, *Hoài My (Giọng Nữ cao)*. Danh sách này chỉ bật ở chế độ lồng tiếng; ở chế độ chỉ phụ đề nó bị xám vì không có giọng đọc.
    - **Original sound** (mặc định 13%) — hạ tiếng gốc xuống nhỏ nhưng vẫn nghe được nhạc nền/hiệu ứng.
    - **Vietnamese dub** (mặc định 100%) — âm lượng giọng Việt.
    - **Show Vietnamese subtitles** — bật/tắt dòng phụ đề Việt trên video.
@@ -85,6 +86,7 @@ Chế độ này **không** chỉnh âm lượng, **không** tắt tiếng, **kh
 | Đổi tốc độ 1.25x/1.5x | Giọng Việt và phụ đề theo tốc độ mới |
 | Khởi động lại backend giữa chừng | Bấm lại đúng nút Start: extension tự tạo lại job cũ, giữ nguyên đoạn đã cache |
 | Đổi video khác | Làm lại bước Start cho video đó |
+| Đổi **Giọng đọc** trong popup | Chỉ áp dụng khi bấm **Start** lại: mỗi giọng là một job/one cache riêng, giọng cũ không bị mất |
 
 ## 8. Cấu hình nhanh theo nhu cầu
 
@@ -95,7 +97,8 @@ Trong `backend\.env` (sửa xong khởi động lại backend):
 | Chờ khởi động ngắn hơn | `STREAM_CHUNK_SECONDS=10` (nhiều lời gọi hơn) |
 | Ít request hơn cho video dài | `STREAM_CHUNK_SECONDS=30`, `STREAM_LOOKAHEAD_CHUNKS=3` |
 | Dự phòng model khi quá tải | `GEMINI_MODEL_FALLBACKS=gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash` |
-| Giọng đọc khác | `EDGE_VOICE=vi-VN-HoaiMyNeural` (mặc định `vi-VN-NamMinhNeural`) |
+| Giọng đọc khác | Chọn trong popup (4 giọng Việt). Mặc định khi chạy backend: `EDGE_VOICE=vi-VN-NamMinhNeural` |
+| Giọng thấp/cao/nhanh/chậm hơn | `EDGE_VOICE=vi-VN-NamMinhNeural\|pitch=-10Hz\|rate=+8%` (pitch theo Hz, rate theo %) |
 | Giọng Gemini tự nhiên hơn (chậm hơn) | `TTS_PROVIDER=gemini` — chỉ dùng cho đoạn ngắn |
 | Xem video dài hơn | `MAX_PROGRESSIVE_SECONDS=43200` (mặc định đã là 12 giờ) |
 
@@ -125,6 +128,7 @@ Cấu hình mặc định trong `.env.example` (`GEMINI_MODEL=gemini-3.5-flash-l
 | `503` / timeout | Model quá tải; backend bỏ qua và thử model kế, popup ghi `(dự phòng)` |
 | Extension bị tắt sau khi reload | Bật lại **Developer mode** ở `chrome://extensions` rồi bật extension |
 | Không có giọng Việt | Kiểm tra popup có hiện đúng provider (`Edge TTS · ...`); nhớ bấm Play trên YouTube |
+| Popup báo `No audio was received` | Dịch vụ Edge chập chờn từng lúc (xảy ra cả với giọng mặc định, không phải do chọn sai giọng). Backend đã tự thử lại 5 lần/câu; vẫn lỗi thì bấm Start lại sau vài phút, hoặc đổi `TTS_PROVIDER=gemini` |
 | Phụ đề không hiện (chế độ phụ đề) | Bấm **▶ Show Vietnamese subtitles** chưa? Đoạn đó dịch xong chưa? Checkbox phụ đề đang bật chưa? |
 
 ## 11. Giới hạn thật lòng cần biết
@@ -132,7 +136,8 @@ Cấu hình mặc định trong `.env.example` (`GEMINI_MODEL=gemini-3.5-flash-l
 - **Không phải lip-sync.** Timestamp do model ước lượng; giọng Việt có thể đến sớm/muộn hoặc bị nói gấp.
 - **Giảm tiếng gốc là giảm cả nhạc nền.** Bản này chưa tách giọng khỏi nhạc.
 - **Chưa xuất file trong progressive.** Download MP3/SRT thuộc Classic mode; phụ đề chỉ hiển thị trực tiếp.
-- **Edge TTS là dịch vụ không chính thức**, có thể thay đổi hoặc ngừng.
+- **Edge TTS là dịch vụ không chính thức**, có thể thay đổi hoặc ngừng. Trả lời chập chờn (`No audio was received`) đã đo thực tế: backend thử lại 5 lần mỗi câu, số lần thử chỉnh bằng `EDGE_TTS_ATTEMPTS`.
+- **4 giọng trong popup là preset Edge TTS miễn phí**, không phải giọng Gemini. Chọn `TTS_PROVIDER=gemini` thì popup vẫn hiện danh sách nhưng backend dùng `GEMINI_VOICE`.
 - **Free Tier có thể dùng nội dung bạn gửi để cải thiện sản phẩm** theo chính sách Google — không xử lý video nhạy cảm.
 - **Backend không có xác thực**, chỉ lắng nghe `127.0.0.1`; dùng trên máy cá nhân, đừng mở ra mạng công cộng.
 - **Chỉ xử lý video bạn có quyền.** Tuân thủ Điều khoản YouTube và luật bản quyền.
@@ -140,6 +145,8 @@ Cấu hình mặc định trong `.env.example` (`GEMINI_MODEL=gemini-3.5-flash-l
 ## 12. Trạng thái kiểm chứng
 
 Đã chạy thật trên Chrome for Testing 156 với video công khai 15:04: tạo bộ đệm, phát đè tiếng Việt, phụ đề đồng bộ, pause/seek/đổi tốc độ, tự dừng chờ bộ đệm, cache sống qua restart backend. Chế độ chỉ phụ đề đã chạy thật (video ngắn): phụ đề đúng nhịp, âm lượng gốc không đổi, không gọi TTS.
+
+Bộ chọn giọng đã kiểm chứng bằng lời gọi thật (video 19 giây, `TTS_PROVIDER=edge`): 4 preset đều render được audio; cùng một câu, `pitch=-10Hz` cho file khác hẳn với giọng chuẩn (khác MD5, cùng độ dài); job `pitch=-10Hz` có `retries=0, failures=0` sau khi tăng số lần thử lên 5; hai giọng khác nhau tạo hai `job_id` khác nhau và cache riêng; chế độ phụ đề bỏ qua giọng (`tts_voice` trống, 0 lời gọi TTS).
 
 **Chưa có xác nhận bằng tai của chủ dự án** về chất lượng giọng đọc — đây là bước cuối bạn tự cảm nhận.
 

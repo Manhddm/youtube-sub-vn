@@ -140,6 +140,10 @@ function render(state) {
   $('stop').disabled = busy || state.stage !== 'playing';
   $('original').disabled = subtitlesMode;
   $('dub').disabled = subtitlesMode;
+  const voice = state.voice || 'vi-VN-NamMinhNeural';
+  const knownVoice = [...$('voiceSelect').options].some(o => o.value === voice);
+  if (knownVoice && document.activeElement !== $('voiceSelect')) $('voiceSelect').value = voice;
+  $('voiceSelect').disabled = subtitlesMode;
   if (document.activeElement !== $('original')) $('original').value = Math.round(state.originalVolume * 100);
   if (document.activeElement !== $('dub')) $('dub').value = Math.round(state.dubVolume * 100);
   $('originalPct').textContent = `${$('original').value}%`;
@@ -190,7 +194,8 @@ function settingsChanged() {
       await command('SAVE_SETTINGS', {settings: {
         originalVolume: Number($('original').value) / 100,
         dubVolume: Number($('dub').value) / 100,
-        subtitles: $('subtitles').checked
+        subtitles: $('subtitles').checked,
+        voice: $('voiceSelect').value
       }});
     } catch (e) { $('status').textContent = e.message; }
   }, 130);
@@ -198,5 +203,6 @@ function settingsChanged() {
 $('original').addEventListener('input', settingsChanged);
 $('dub').addEventListener('input', settingsChanged);
 $('subtitles').addEventListener('change', settingsChanged);
+$('voiceSelect').addEventListener('change', settingsChanged);
 refresh();
 setInterval(refresh, 2200);

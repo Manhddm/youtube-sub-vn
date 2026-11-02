@@ -35,6 +35,14 @@
       </section>
     </details>
     <section class="panel"><div class="eyebrow">VOICE &amp; SUBTITLES</div>
+      <label class="voice"><span>Giọng đọc</span>
+        <select id="voiceSelect">
+          <option value="vi-VN-NamMinhNeural">Nam Minh (Giọng Nam chuẩn)</option>
+          <option value="vi-VN-HoaiMyNeural">Hoài My (Giọng Nữ chuẩn)</option>
+          <option value="vi-VN-NamMinhNeural|pitch=-10Hz">Nam Minh (Giọng Nam trầm)</option>
+          <option value="vi-VN-HoaiMyNeural|pitch=+8Hz">Hoài My (Giọng Nữ cao)</option>
+        </select>
+      </label>
       <label class="range"><span>Original sound</span><output id="originalPct">13%</output><input id="original" type="range" min="0" max="100" value="13"/></label>
       <label class="range"><span>Vietnamese dub</span><output id="dubPct">100%</output><input id="dub" type="range" min="0" max="100" value="100"/></label>
       <label class="switch"><span>Show Vietnamese subtitles</span><input type="checkbox" id="subtitles" checked /></label>

@@ -1,6 +1,7 @@
 """Run: python tests/progressive_test.py (fully mocked; no Gemini quota)."""
 import io
 import json
+import os
 import sys
 import tempfile
 import time
@@ -9,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
+os.environ['TRANSLATION_PROVIDER'] = 'gemini'
+os.environ['TTS_PROVIDER'] = 'gemini'
 import progressive
 
 
@@ -18,6 +21,11 @@ def synth_wav(client, text, path):
         f.setsampwidth(2)
         f.setframerate(24000)
         f.writeframes(b'\0\0' * 12000)  # half second, mock voice
+
+
+def fake_synthesize(items, provider, client=None, voice='', max_parallel=4):
+    for text, path in items:
+        synth_wav(client, text, path)
 
 
 class FakeInteractions:
@@ -50,18 +58,18 @@ def wait_for(predicate, timeout=5.):
 
 def main():
     original_client = progressive.gemini_client
-    original_synth = progressive.synth_gemini
+    original_synth = progressive.synthesize_voices
     progressive.gemini_client = lambda *args, **kwargs: FakeClient()
-    progressive.synth_gemini = synth_wav
+    progressive.synthesize_voices = fake_synthesize
     try:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)
             job = progressive.ProgressiveJob('abcdef12345', 112., path)
-            assert job.count == 6
+            assert job.count == 8
             assert wait_for(lambda: job.snapshot()['completed_chunks'] == 4), job.snapshot()
             snap = job.snapshot()
             assert snap['stage'] == 'buffered', snap
-            assert snap['playable_until'] == 80., snap
+            assert snap['playable_until'] == 60., snap
             assert set(snap['models']) == {'analysis', 'tts'}, snap
             assert snap['models']['analysis'], 'the analysis model in use should be reported'
             stats = snap['stats']
@@ -72,19 +80,19 @@ def main():
             assert sorted(snap['ready_chunks']) == [0,1,2,3], snap
             assert not (path/'chunk_00004.wav').exists(), 'Worker should NOT process unneeded future'
             with wave.open(str(path/'chunk_00000.wav')) as wav:
-                assert wav.getnframes() == 20*24000, wav.getnframes()
+                assert wav.getnframes() == 15*24000, wav.getnframes()
             job.seek(108)
-            assert wait_for(lambda: 5 in job.snapshot()['ready_chunks']), job.snapshot()
+            assert wait_for(lambda: 7 in job.snapshot()['ready_chunks']), job.snapshot()
             assert 4 not in job.snapshot()['ready_chunks'], 'Seek should jump to requested window'
             assert job.snapshot()['playhead_buffered_until'] == 112.
-            job.seek(85)
+            job.seek(65)
             assert wait_for(lambda: job.snapshot()['stage'] == 'complete'), job.snapshot()
             job.close()
             job2 = progressive.ProgressiveJob('abcdef12345', 112., path)
             assert job2.snapshot()['stage'] == 'complete'
-            assert job2.snapshot()['completed_chunks'] == 6
+            assert job2.snapshot()['completed_chunks'] == 8
             job2.close()
-            print('PASS: 20s WAV chunks, 80s initial buffer, on-demand seek, cache reuse')
+            print('PASS: 15s WAV chunks, 60s initial buffer, on-demand seek, cache reuse')
         fake = FakeClient()
         cues = progressive.analyze_youtube_window(fake, 'abcdef12345', 112, 20, 40)
         assert cues and cues[0]['start'] >= 20
@@ -105,7 +113,7 @@ def main():
             progressive.analyze_youtube_window = flaky
             with tempfile.TemporaryDirectory() as folder:
                 job = progressive.ProgressiveJob('retry123456', 40., Path(folder))
-                assert wait_for(lambda: job.snapshot()['completed_chunks'] == 2), job.snapshot()
+                assert wait_for(lambda: job.snapshot()['completed_chunks'] == 3), job.snapshot()
                 assert calls['n'] >= 3, calls
                 assert not job.snapshot()['error'], job.snapshot()
                 job.close()
@@ -126,7 +134,7 @@ def main():
             progressive.CHUNK_RETRY_SECONDS = original_delay
     finally:
         progressive.gemini_client = original_client
-        progressive.synth_gemini = original_synth
+        progressive.synthesize_voices = original_synth
 
 
 if __name__ == '__main__':

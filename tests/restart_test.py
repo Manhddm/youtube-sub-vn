@@ -60,7 +60,7 @@ def main():
 
         snap = client.get(f"/stream/jobs/{key}").json()
         assert snap["ready_chunks"] == [0], snap["ready_chunks"]
-        assert snap["total_chunks"] == 3, snap["total_chunks"]
+        assert snap["total_chunks"] == 4, snap["total_chunks"]
         assert snap["stage"] == "buffered", snap["stage"]
         assert "model_order" in snap and snap["model_order"]["analysis"], snap
         assert snap["tts_provider"] in ("gemini", "edge"), snap

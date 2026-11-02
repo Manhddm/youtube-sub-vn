@@ -16,7 +16,9 @@ from fastapi.responses import FileResponse
 # Progressive mode uses its own chunk processor; older full-file routes remain usable.
 from pydantic import BaseModel
 
-from engine import process_recording, process_youtube_url
+from engine import (parse_voice_spec, process_recording, process_youtube_url,
+                    translation_provider, tts_provider)
+from local_pipeline import get_pipeline
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -38,6 +40,7 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+threading.Thread(target=lambda: get_pipeline()._ensure_mt(), daemon=True).start()
 
 
 def progress(job_id: str, stage: str, amount: float, message: str):
@@ -45,11 +48,12 @@ def progress(job_id: str, stage: str, amount: float, message: str):
         items[job_id].update(stage=stage, progress=round(amount, 3), message=message)
 
 
-def work(job_id: str, file_path: Path, folder: Path):
+def work(job_id: str, file_path: Path, folder: Path, voice: str = ""):
     try:
         info = process_recording(
             file_path, folder,
             lambda stage, pct, msg: progress(job_id, stage, pct, msg),
+            voice,
         )
         with lock:
             items[job_id].update(info)
@@ -60,17 +64,28 @@ def work(job_id: str, file_path: Path, folder: Path):
 class YouTubeJob(BaseModel):
     video_id: str
     declared_duration: float
+    voice: str = "vi-VN-NamMinhNeural"
 
 
 class StreamJobRequest(YouTubeJob):
     mode: str = "dub"
 
 
-def work_public_video(job_id: str, video_id: str, duration: float, folder: Path):
+def require_voice(voice: str) -> str:
+    try:
+        parse_voice_spec(voice)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return voice
+
+
+def work_public_video(job_id: str, video_id: str, duration: float, folder: Path,
+                      voice: str = ""):
     try:
         info = process_youtube_url(
             video_id, duration, folder,
             lambda stage, pct, msg: progress(job_id, stage, pct, msg),
+            voice,
         )
         with lock:
             items[job_id].update(info)
@@ -84,6 +99,7 @@ def start_youtube_job(request: YouTubeJob):
         raise HTTPException(400, "Invalid video ID")
     if not (1 <= request.declared_duration <= MAX_SECS + 1):
         raise HTTPException(400, f"Video must be shorter than {MAX_SECS} seconds")
+    voice = require_voice(request.voice)
     folder = JOBS / uuid.uuid4().hex
     folder.mkdir(parents=True)
     job_id = folder.name
@@ -93,14 +109,15 @@ def start_youtube_job(request: YouTubeJob):
             "stage": "queued", "progress": 0,
             "message": "Gemini will analyze the public video URL", "segments": 0,
         }
-    executor.submit(work_public_video, job_id, request.video_id, request.declared_duration, folder)
+    executor.submit(work_public_video, job_id, request.video_id,
+                    request.declared_duration, folder, voice)
     return {"job_id": job_id}
 
 
 @app.get("/health")
 def health():
     return {"ok": True, "model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
-            "tts": os.getenv("TTS_PROVIDER", "gemini")}
+            "translation": translation_provider(), "tts": tts_provider()}
 
 
 @app.post("/jobs", status_code=202)
@@ -108,11 +125,13 @@ async def start_job(
     audio: UploadFile = File(...),
     video_id: str = Form(...),
     declared_duration: float = Form(...),
+    voice: str = Form("vi-VN-NamMinhNeural"),
 ):
     if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", video_id):
         raise HTTPException(400, "Invalid YouTube video ID")
     if not (1 <= declared_duration <= MAX_SECS + 1):
         raise HTTPException(400, f"Video must be shorter than {MAX_SECS} seconds")
+    selected_voice = require_voice(voice)
     folder = JOBS / uuid.uuid4().hex
     folder.mkdir(parents=True)
     input_file = folder / "capture.webm"
@@ -134,7 +153,7 @@ async def start_job(
             "job_id": job_id, "video_id": video_id, "stage": "queued", "progress": 0,
             "message": "Queued for Gemini analysis", "segments": 0,
         }
-    executor.submit(work, job_id, input_file, folder)
+    executor.submit(work, job_id, input_file, folder, selected_voice)
     return {"job_id": job_id}
 
 
@@ -192,13 +211,14 @@ def start_stream_job(request: StreamJobRequest):
     mode = request.mode.strip().lower()
     if mode not in ("dub", "subtitles"):
         raise HTTPException(400, "mode must be dub or subtitles")
-    job_id = cache_key(request.video_id, request.declared_duration, mode)
+    voice = require_voice(request.voice)
+    job_id = cache_key(request.video_id, request.declared_duration, mode, voice)
     with stream_lock:
         job = stream_jobs.get(job_id)
         if job is None:
             folder = JOBS / job_id
             job = ProgressiveJob(request.video_id, request.declared_duration,
-                                 folder, mode)
+                                 folder, mode, voice)
             stream_jobs[job_id] = job
         job.seek(0)
         job.restart_if_failed()
@@ -251,6 +271,6 @@ def stream_chunk_cues(job_id: str, index: int):
     job = require_stream(job_id)
     if index < 0 or index >= job.count:
         raise HTTPException(404, "Unknown chunk")
-    if index not in job.snapshot()["ready_chunks"]:
+    if not job.cue_ready(index):
         raise HTTPException(409, "Chunk not ready yet")
     return FileResponse(job.folder / f"chunk_{index:05}.json", media_type="application/json")

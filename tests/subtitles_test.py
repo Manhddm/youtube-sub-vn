@@ -5,6 +5,7 @@ Run: python tests/subtitles_test.py (fully mocked; no Gemini quota).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import time
@@ -12,6 +13,8 @@ from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
+os.environ["TRANSLATION_PROVIDER"] = "gemini"
+os.environ["TTS_PROVIDER"] = "edge"
 import progressive  # noqa: E402
 
 VIDEO_ID = "subtitles123"
@@ -42,12 +45,10 @@ def wait_for(predicate, timeout=5.0):
 def main():
     original_client = progressive.gemini_client
     original_analyze = progressive.analyze_youtube_window
-    original_edge = progressive.synth_edge
-    original_gemini_tts = progressive.synth_gemini
+    original_synth = progressive.synthesize_voices
     progressive.gemini_client = lambda *args, **kwargs: object()
     progressive.analyze_youtube_window = fake_analyze
-    progressive.synth_edge = forbidden_tts
-    progressive.synth_gemini = forbidden_tts
+    progressive.synthesize_voices = forbidden_tts
     try:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)
@@ -64,22 +65,22 @@ def main():
             assert snap["stats"]["chunks_done"] == 4, snap["stats"]
             assert snap["stats"]["tts_calls"] == 0, snap["stats"]
             assert snap["stats"]["tts_seconds"] == 0, snap["stats"]
-            assert snap["playable_until"] == 80.0, snap
+            assert snap["playable_until"] == 60.0, snap
             assert (path / "chunk_00000.json").exists()
             assert not list(path.glob("*.wav")), "no dubbed audio should be written"
             cues = json.loads((path / "chunk_00000.json").read_text(encoding="utf-8"))
             assert cues[0]["vi"] == "Xin chào", cues
 
             job.seek(108)
-            assert wait_for(lambda: 5 in job.snapshot()["ready_chunks"]), job.snapshot()
+            assert wait_for(lambda: 7 in job.snapshot()["ready_chunks"]), job.snapshot()
             assert job.snapshot()["playhead_buffered_until"] == 112.0
-            job.seek(85)
+            job.seek(65)
             assert wait_for(lambda: job.snapshot()["stage"] == "complete"), job.snapshot()
             job.close()
 
             cached = progressive.ProgressiveJob(VIDEO_ID, 112.0, path, "subtitles")
             assert cached.snapshot()["stage"] == "complete", cached.snapshot()
-            assert cached.snapshot()["completed_chunks"] == 6, cached.snapshot()
+            assert cached.snapshot()["completed_chunks"] == 8, cached.snapshot()
             cached.close()
         print("PASS: subtitles-only job writes cues, skips TTS, and reuses its cache")
 
@@ -124,8 +125,7 @@ def main():
     finally:
         progressive.gemini_client = original_client
         progressive.analyze_youtube_window = original_analyze
-        progressive.synth_edge = original_edge
-        progressive.synth_gemini = original_gemini_tts
+        progressive.synthesize_voices = original_synth
 
 
 if __name__ == "__main__":
